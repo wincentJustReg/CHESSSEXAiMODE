@@ -1,0 +1,253 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+CHESS CHAMS ULTIMATE - V13.1 "HUD + УДОБНЫЙ ОВЕРЛЕЙ"
+"""
+
+import sys
+import os
+import json
+import time
+from dataclasses import dataclass
+from enum import Enum
+
+import numpy as np
+import cv2
+import mss
+from stockfish import Stockfish
+
+from PyQt5.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QPushButton, QLabel,
+    QVBoxLayout, QHBoxLayout, QMessageBox
+)
+from PyQt5.QtCore import Qt, QTimer, QPoint, QRect
+from PyQt5.QtGui import QPainter, QColor, QPen, QFont
+
+
+# ================== КОНСТАНТЫ ==================
+VERSION = "13.1"
+STOCKFISH_PATH = r"E:\pythonchessSEXXD\stockfish\stockfish-windows-x86-64.exe"  # ← ИЗМЕНИ ЕСЛИ НАДО
+
+
+class GameMode(Enum):
+    CALIBRATION = "calibration"
+    VISION = "vision"
+    STEALTH = "stealth"
+
+
+# ================== CONFIG ==================
+@dataclass
+class DisplayConfig:
+    width: int = 820
+    height: int = 820
+    calibration_alpha: float = 0.9
+    game_alpha: float = 0.35
+
+class ConfigManager:
+    def __init__(self):
+        self.display = DisplayConfig()
+
+    def save_all(self):
+        pass  # пока упрощённо
+
+
+# ================== VISION ==================
+class ScreenCapture:
+    def __init__(self):
+        self.sct = mss.MSS()   # Исправлено DeprecationWarning
+
+    def capture_region(self, x, y, w, h):
+        try:
+            monitor = {"top": y, "left": x, "width": w, "height": h}
+            screenshot = self.sct.grab(monitor)
+            frame = np.array(screenshot)
+            return cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
+        except:
+            return None
+
+
+class ChessVision:
+    def __init__(self):
+        self.capture = ScreenCapture()
+        self.stockfish = None
+
+    def init_stockfish(self):
+        try:
+            self.stockfish = Stockfish(path=STOCKFISH_PATH)
+            self.stockfish.set_depth(20)
+            self.stockfish.set_skill_level(20)
+            print("✅ Stockfish загружен")
+            return True
+        except Exception as e:
+            print(f"❌ Stockfish ошибка: {e}")
+            return False
+
+    def get_best_move(self, fen="rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"):
+        if not self.stockfish:
+            return "e2e4"
+        try:
+            self.stockfish.set_fen_position(fen)
+            return self.stockfish.get_best_move()
+        except:
+            return "e2e4"
+
+
+# ================== ГЛАВНОЕ ОКНО ==================
+class ChessOverlay(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.config = ConfigManager()
+        self.vision = ChessVision()
+        self.vision.init_stockfish()
+
+        self.mode = GameMode.CALIBRATION
+        self.locked = False
+        self.current_move = "e2e4"
+
+        self.drag_pos = None
+        self.resize_edge = None
+
+        self.init_ui()
+
+    def init_ui(self):
+        self.setWindowTitle(f"Chess Chams Ultimate v{VERSION}")
+        self.setGeometry(200, 200, 820, 820)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setWindowFlags(
+            Qt.FramelessWindowHint | 
+            Qt.WindowStaysOnTopHint | 
+            Qt.Tool
+        )
+        self.setWindowOpacity(self.config.display.calibration_alpha)
+
+        # Центральный виджет
+        central = QWidget()
+        self.setCentralWidget(central)
+        layout = QVBoxLayout(central)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        # HUD панель сверху
+        self.hud = QWidget()
+        self.hud.setStyleSheet("background: rgba(0,0,0,180);")
+        hud_layout = QHBoxLayout(self.hud)
+        hud_layout.setContentsMargins(8, 4, 8, 4)
+
+        title = QLabel("♟ CHESS CHAMS ULTIMATE")
+        title.setFont(QFont("Arial", 10, QFont.Bold))
+        title.setStyleSheet("color: #00FFAA;")
+
+        self.btn_lock = QPushButton("🔒 ЗАБЛОКИРОВАТЬ")
+        self.btn_lock.clicked.connect(self.toggle_lock)
+
+        self.btn_capture = QPushButton("📸 Захватить область")
+        self.btn_capture.clicked.connect(self.manual_capture)
+
+        self.btn_stealth = QPushButton("👁 Стелс")
+        self.btn_stealth.clicked.connect(self.toggle_stealth)
+
+        for btn in (self.btn_lock, self.btn_capture, self.btn_stealth):
+            btn.setFixedHeight(32)
+
+        hud_layout.addWidget(title)
+        hud_layout.addStretch()
+        hud_layout.addWidget(self.btn_lock)
+        hud_layout.addWidget(self.btn_capture)
+        hud_layout.addWidget(self.btn_stealth)
+
+        layout.addWidget(self.hud)
+        layout.addStretch()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.drag_pos = event.globalPos() - self.pos()
+            # Простой ресайз по углам
+            if event.pos().x() > self.width() - 30 and event.pos().y() > self.height() - 30:
+                self.resize_edge = "bottom-right"
+
+    def mouseMoveEvent(self, event):
+        if self.drag_pos and not self.locked:
+            if self.resize_edge:
+                new_w = event.globalPos().x() - self.pos().x()
+                new_h = event.globalPos().y() - self.pos().y()
+                self.resize(max(600, new_w), max(600, new_h))
+            else:
+                self.move(event.globalPos() - self.drag_pos)
+
+    def mouseReleaseEvent(self, event):
+        self.drag_pos = None
+        self.resize_edge = None
+
+    def toggle_lock(self):
+        self.locked = not self.locked
+        if self.locked:
+            self.mode = GameMode.VISION
+            self.setWindowOpacity(0.35)
+            self.btn_lock.setText("🔓 РАЗБЛОКИРОВАТЬ")
+            self.log("VISION", "Режим анализа включён")
+        else:
+            self.mode = GameMode.CALIBRATION
+            self.setWindowOpacity(0.9)
+            self.btn_lock.setText("🔒 ЗАБЛОКИРОВАТЬ")
+
+    def toggle_stealth(self):
+        current = self.windowOpacity()
+        new = 0.08 if current > 0.1 else 0.35
+        self.setWindowOpacity(new)
+        self.log("STEALTH", f"Прозрачность: {new:.2f}")
+
+    def manual_capture(self):
+        # Пока заглушка
+        self.current_move = self.vision.get_best_move()
+        QMessageBox.information(self, "Захват", 
+                              f"Анализ выполнен!\nРекомендуемый ход: {self.current_move.upper()}")
+
+    def log(self, category, msg):
+        print(f"[{category}] {msg}")
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+
+        if self.mode == GameMode.CALIBRATION:
+            self.draw_calibration(painter)
+        else:
+            self.draw_vision(painter)
+
+    def draw_calibration(self, painter):
+        painter.fillRect(self.rect(), QColor(10, 10, 20, 240))
+        pen = QPen(QColor(255, 85, 0), 4)
+        painter.setPen(pen)
+        painter.drawRect(10, 60, self.width()-20, self.height()-120)
+
+        painter.setPen(QColor(255, 255, 255))
+        painter.setFont(QFont("Arial", 14, QFont.Bold))
+        painter.drawText(self.rect(), Qt.AlignCenter, 
+            "♟ НАСТРОЙКА\n\n"
+            "1. Перетащи окно на шахматную доску\n"
+            "2. Растяни за правый нижний угол\n"
+            "3. Нажми «🔒 ЗАБЛОКИРОВАТЬ»")
+
+    def draw_vision(self, painter):
+        painter.fillRect(self.rect(), QColor(0, 0, 0, 80))
+        painter.setPen(QPen(QColor(0, 255, 100), 5))
+        painter.drawLine(150, 300, 550, 450)
+
+        painter.setPen(QColor(255, 255, 255))
+        painter.setFont(QFont("Arial", 13, QFont.Bold))
+        painter.drawText(30, 120, f"Лучший ход → {self.current_move.upper()}")
+
+
+# ================== ЗАПУСК ==================
+def main():
+    print("=" * 75)
+    print(f"♟ CHESS CHAMS ULTIMATE v{VERSION} — HUD VERSION")
+    print("=" * 75)
+
+    app = QApplication(sys.argv)
+    window = ChessOverlay()
+    window.show()
+    sys.exit(app.exec_())
+
+
+if __name__ == "__main__":
+    main()
