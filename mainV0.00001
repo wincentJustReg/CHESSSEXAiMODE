@@ -1,0 +1,257 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+CHESS CHAMS ULTIMATE - V13.0 "VISION + STOCKFISH"
+"""
+
+import sys
+import os
+import json
+import random
+import time
+import math
+from dataclasses import dataclass
+from typing import List, Dict, Tuple, Optional
+from enum import Enum
+
+import numpy as np
+import cv2
+import mss
+from stockfish import Stockfish
+import chess
+
+from PyQt5.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QMessageBox
+)
+from PyQt5.QtCore import (
+    Qt, QTimer, QPointF, QRectF
+)
+from PyQt5.QtGui import (
+    QPainter, QColor, QPen, QBrush, QFont, QPolygonF,
+    QLinearGradient
+)
+
+# ================== КОНСТАНТЫ ==================
+VERSION = "13.0"
+TITLE = f"♟ CHESS CHAMS ULTIMATE v{VERSION}"
+CONFIG_FILE = "chess_chams_config_v13.json"
+LOG_FILE = "chess_chams_log.txt"
+STOCKFISH_PATH = r"C:\stockfish\stockfish-windows-x86-64.exe"  # ← ИЗМЕНИ НА СВОЙ ПУТЬ!
+
+
+# ================== ENUMS ==================
+class GameMode(Enum):
+    CALIBRATION = "calibration"
+    VISION = "vision"
+    GAME = "game"
+    STEALTH = "stealth"
+    CLICK_THROUGH = "click_through"
+
+
+# ================== КОНФИГУРАЦИЯ ==================
+@dataclass
+class UIConfig:
+    theme: str = "dark"
+    language: str = "ru"
+    show_tooltips: bool = True
+    animations: bool = True
+
+@dataclass
+class DisplayConfig:
+    width: int = 800
+    height: int = 800
+    min_size: int = 300
+    max_size: int = 1500
+    calibration_alpha: float = 0.85
+    game_alpha: float = 0.45
+    stealth_alpha: float = 0.25
+    click_through_alpha: float = 0.08
+    color_bg_dark: str = "#0A0A0A"
+    color_border: str = "#FF5500"
+    color_text: str = "#FFFFFF"
+    color_highlight: str = "#00FFAA"
+    glow_enabled: bool = True
+    pulse_enabled: bool = True
+
+@dataclass
+class VisionConfig:
+    enabled: bool = True
+    capture_interval: int = 1000
+    stockfish_depth: int = 20
+    debug_vision: bool = False
+
+# ================== CONFIG MANAGER ==================
+class ConfigManager:
+    def __init__(self):
+        self.ui = UIConfig()
+        self.display = DisplayConfig()
+        self.vision = VisionConfig()
+        self.loaded = False
+
+    def load_all(self):
+        if os.path.exists(CONFIG_FILE):
+            try:
+                with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                # Простая загрузка (можно расширить позже)
+                self.loaded = True
+            except:
+                pass
+
+    def save_all(self):
+        try:
+            data = {
+                'ui': self.ui.__dict__,
+                'display': self.display.__dict__,
+                'vision': self.vision.__dict__,
+            }
+            with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        except:
+            pass
+
+
+# ================== SCREEN CAPTURE & VISION ==================
+class ScreenCapture:
+    def __init__(self):
+        self.sct = mss.mss()
+
+    def capture_region(self, x: int, y: int, width: int, height: int):
+        try:
+            monitor = {"top": y, "left": x, "width": width, "height": height}
+            screenshot = self.sct.grab(monitor)
+            frame = np.array(screenshot)
+            frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
+            return frame
+        except:
+            return None
+
+
+class ChessVision:
+    def __init__(self):
+        self.capture = ScreenCapture()
+        self.stockfish = None
+
+    def init_stockfish(self):
+        try:
+            self.stockfish = Stockfish(path=STOCKFISH_PATH)
+            self.stockfish.set_depth(20)
+            self.stockfish.set_skill_level(20)
+            print("✅ Stockfish загружен успешно!")
+            return True
+        except Exception as e:
+            print(f"❌ Stockfish не найден: {e}")
+            print("Укажи правильный путь к stockfish.exe в коде!")
+            return False
+
+    def get_best_move(self, fen: str):
+        if not self.stockfish:
+            return "e2e4"
+        try:
+            self.stockfish.set_fen_position(fen)
+            return self.stockfish.get_best_move()
+        except:
+            return "e2e4"
+
+
+# ================== ГЛАВНОЕ ОКНО ==================
+class ChessOverlay(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.config_manager = ConfigManager()
+        self.config_manager.load_all()
+
+        self.vision = ChessVision()
+        self.vision.init_stockfish()
+
+        self.current_mode = GameMode.CALIBRATION
+        self.locked = False
+        self.click_through = False
+        self.width = 800
+        self.height = 800
+        self.current_move = "e2e4"
+        self.best_move_uci = None
+
+        self.setup_window()
+        self.setup_timers()
+
+        self.log("SYSTEM", f"Chess Chams Ultimate v{VERSION} запущен")
+
+    def setup_window(self):
+        self.setWindowTitle(TITLE)
+        self.setGeometry(100, 100, self.width, self.height)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
+        self.setWindowOpacity(self.config_manager.display.calibration_alpha)
+
+    def setup_timers(self):
+        self.update_timer = QTimer()
+        self.update_timer.timeout.connect(self.update)
+        self.update_timer.start(50)
+
+    def log(self, category: str, message: str):
+        print(f"[{category}] {message}")
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_Escape:
+            self.close()
+        elif event.key() == Qt.Key_L and event.modifiers() & Qt.ControlModifier:
+            self.toggle_lock()
+
+    def toggle_lock(self):
+        self.locked = not self.locked
+        if self.locked:
+            self.current_mode = GameMode.VISION
+            self.setWindowOpacity(0.4)
+            self.log("SYSTEM", "Режим VISION активирован")
+        else:
+            self.current_mode = GameMode.CALIBRATION
+            self.setWindowOpacity(0.85)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+
+        if self.current_mode == GameMode.CALIBRATION:
+            self.draw_calibration(painter)
+        else:
+            self.draw_vision(painter)
+
+    def draw_calibration(self, painter):
+        painter.fillRect(self.rect(), QColor(10, 10, 10, 220))
+        painter.setPen(QPen(QColor(255, 85, 0), 3))
+        painter.drawRect(5, 5, self.width-10, self.height-10)
+
+        painter.setPen(QColor(255, 255, 255))
+        painter.setFont(QFont("Arial", 16, QFont.Bold))
+        painter.drawText(self.rect(), Qt.AlignCenter, 
+                        "♟ CHESS CHAMS ULTIMATE v13.0\n\n"
+                        "Перетащи окно на шахматную доску\n"
+                        "и нажми Ctrl + L для запуска анализа")
+
+    def draw_vision(self, painter):
+        # Фон
+        painter.fillRect(self.rect(), QColor(0, 0, 0, 100))
+        
+        # Стрелка (пока заглушка)
+        painter.setPen(QPen(QColor(0, 255, 170), 6))
+        painter.drawLine(100, 200, 500, 400)
+
+        painter.setPen(QColor(255, 255, 255))
+        painter.setFont(QFont("Arial", 12))
+        painter.drawText(20, 50, f"Лучший ход: {self.current_move.upper()}")
+
+# ================== ЗАПУСК ==================
+def main():
+    print("=" * 70)
+    print(f"♟ CHESS CHAMS ULTIMATE v{VERSION} — ЗАПУСК")
+    print("=" * 70)
+
+    app = QApplication(sys.argv)
+    overlay = ChessOverlay()
+    overlay.show()
+    sys.exit(app.exec_())
+
+
+if __name__ == "__main__":
+    main()
